@@ -17,10 +17,7 @@ echo "Checking for Docker installation"
 if ! command -v docker &> /dev/null; then
   echo "Docker not found, installing..."
 
-  for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    apt-get remove -y $pkg || true
-  done
-
+  apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc || true
   apt-get update
   apt-get install -y ca-certificates curl
 
