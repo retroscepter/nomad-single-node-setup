@@ -1,47 +1,64 @@
 #!/bin/bash
 
-set -e
-
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
+if [ "$(id -u)" != "0" ]; then
+  echo "This script must be run as root" >&2
   exit 1
 fi
 
-if ! grep -E 'Ubuntu|Debian' /etc/os-release > /dev/null; then
+if ! grep -E 'Ubuntu|Debian' /etc/os-release >/dev/null; then
   echo "This script can only be run on Ubuntu/Debian servers"
   exit 1
 fi
 
-echo "Checking for Docker installation"
+command_exists() {
+  command -v "$@" >/dev/null 2>&1
+}
 
-if ! command -v docker &> /dev/null; then
-  echo "Docker not found, installing..."
+get_ip() {
+  # Try to get IPv4
+  local ipv4=$(curl -4s https://ifconfig.io 2>/dev/null)
 
-  apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc || true
-  apt-get update
-  apt-get install -y ca-certificates curl
+  if [ -n "$ipv4" ]; then
+    echo "$ipv4"
+  else
+    # Try to get IPv6
+    local ipv6=$(curl -6s https://ifconfig.io 2>/dev/null)
+    if [ -n "$ipv6" ]; then
+      echo "$ipv6"
+    fi
+  fi
+}
 
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
+format_ip_for_url() {
+  local ip="$1"
+  if echo "$ip" | grep -q ':'; then
+    # IPv6
+    echo "[${ip}]"
+  else
+    # IPv4
+    echo "${ip}"
+  fi
+}
 
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+NC="\033[0m"
 
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+if command_exists docker; then
+  echo "Docker already installed"
 else
-  echo "Docker is already installed"
+  curl -sSL https://get.docker.com | sh
 fi
 
-echo "Setting up network settings"
+echo "Setting up network settings..."
 
-echo "49152 65535" > /proc/sys/net/ipv4/ip_local_port_range
+echo "49152 65535" >/proc/sys/net/ipv4/ip_local_port_range
 
 for setting in bridge-nf-call-arptables bridge-nf-call-ip6tables bridge-nf-call-iptables; do
-  echo 1 > /proc/sys/net/bridge/$setting
+  echo 1 >/proc/sys/net/bridge/$setting
 done
 
-cat <<EOF > /etc/sysctl.d/98-hashicorp-nomad.conf
+cat <<EOF >/etc/sysctl.d/98-hashicorp-nomad.conf
 net.bridge.bridge-nf-call-arptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
@@ -49,13 +66,11 @@ EOF
 
 sysctl --system
 
-echo "Checking for Nomad installation"
+if ! command -v nomad &>/dev/null; then
+  echo "Installing Nomad..."
 
-if ! command -v nomad &> /dev/null; then
-  echo "Nomad not found, installing..."
-
-  groupdel nomad || true
-  userdel nomad || true
+  groupdel nomad >/dev/null 2>&1 || true
+  userdel nomad >/dev/null 2>&1 || true
 
   apt-get update
   apt-get install -y wget gpg coreutils
@@ -63,28 +78,23 @@ if ! command -v nomad &> /dev/null; then
   if ! test -f /usr/share/keyrings/hashicorp-archive-keyring.gpg; then
     wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
   fi
-  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
+  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" >/etc/apt/sources.list.d/hashicorp.list
   apt-get update && apt-get install -y nomad
 else
   echo "Nomad is already installed"
 fi
 
-echo "Creating Nomad users"
+echo "Installing CNI plugins..."
 
-groupadd -r nomad || true
-useradd --system --home /etc/nomad.d -s /bin/false -g nomad nomad || true
-
-echo "Installing CNI plugins"
-
-CNI_URL="https://github.com/containernetworking/plugins/releases/download/v1.0.0/cni-plugins-linux-$( [ $(uname -m) = aarch64 ] && echo arm64 || echo amd64)-v1.0.0.tgz"
+CNI_URL="https://github.com/containernetworking/plugins/releases/download/v1.0.0/cni-plugins-linux-$([ $(uname -m) = aarch64 ] && echo arm64 || echo amd64)-v1.0.0.tgz"
 curl -L -o cni-plugins.tgz "$CNI_URL"
 mkdir -p /opt/cni/bin
 tar -C /opt/cni/bin -xzf cni-plugins.tgz
 rm cni-plugins.tgz
 
-echo "Creating systemd unit file"
+echo "Creating systemd unit file..."
 
-cat <<EOF > /etc/systemd/system/nomad.service
+cat <<EOF >/etc/systemd/system/nomad.service
 [Unit]
 Description=Nomad
 Documentation=https://www.nomadproject.io/docs/
@@ -109,7 +119,7 @@ OOMScoreAdjust=-1000
 WantedBy=multi-user.target
 EOF
 
-echo "Creating Nomad config files"
+echo "Creating Nomad config files..."
 
 mkdir -p /opt/cni/bin /opt/nomad/{plugins,data} /etc/nomad.d
 touch /etc/nomad.d/{nomad,server,client}.hcl
@@ -117,7 +127,7 @@ touch /etc/nomad.d/{nomad,server,client}.hcl
 chmod 700 /etc/nomad.d
 chown -R nomad:nomad /etc/nomad.d /opt/nomad
 
-cat <<EOF > /etc/nomad.d/nomad.hcl
+cat <<EOF >/etc/nomad.d/nomad.hcl
 datacenter = "dc1"
 bind_addr = "0.0.0.0"
 data_dir = "/opt/nomad/data"
@@ -129,14 +139,14 @@ log_rotate_bytes = 10485760
 log_rotate_max_files = 5
 EOF
 
-cat <<EOF > /etc/nomad.d/server.hcl
+cat <<EOF >/etc/nomad.d/server.hcl
 server {
   enabled = true
   bootstrap_expect = 1
 }
 EOF
 
-cat <<EOF > /etc/nomad.d/client.hcl
+cat <<EOF >/etc/nomad.d/client.hcl
 client {
   enabled = true
   servers = ["127.0.0.1"]
@@ -147,29 +157,31 @@ client {
 }
 EOF
 
-echo "Creating Traefik data dir"
+echo "Creating Traefik data dir..."
 
 mkdir -p /opt/traefik/data
 chown -R nomad:nomad /opt/traefik/data
 
-echo "Starting Nomad"
+echo "Starting Nomad..."
 
 systemctl daemon-reload
 systemctl unmask nomad
 systemctl enable --now nomad
 
-echo "Waiting for Nomad agent to be ready"
+echo "Waiting for Nomad agent to be ready..."
 
-until nomad node status &> /dev/null; do
-  echo "Nomad agent is not ready, waiting..."
+until [ ! -z "$(nomad node status 2>/dev/null)" ]; do
   sleep 5
 done
 
-echo "Deploying Traefik"
+echo "Deploying Traefik..."
 
 mkdir -p ~/nomad
 
-cat <<EOF > ~/nomad/traefik.nomad
+advertise_addr=$(get_ip)
+formatted_addr=$(format_ip_for_url "$advertise_addr")
+
+cat <<EOF >~/nomad/traefik.nomad
 job "traefik" {
   datacenters = ["dc1"]
   type = "service"
@@ -214,7 +226,7 @@ job "traefik" {
 
       config {
         image = "traefik"
-        ports = ["admin", "http"]
+        ports = ["admin", "http", "https"]
         args = [
           "--api.dashboard=true",
           "--api.insecure=true",
@@ -225,7 +237,7 @@ job "traefik" {
           "--certificatesresolvers.letsencrypt.acme.storage=/opt/traefik/data/acme.json",
           "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
           "--providers.nomad=true",
-          "--providers.nomad.endpoint.address=http://135.148.136.163:4646", ### IP to your nomad server
+          "--providers.nomad.endpoint.address=http://${formatted_addr}:4646",
           "--log.level=DEBUG",
         ]
       }
@@ -241,3 +253,9 @@ job "traefik" {
 EOF
 
 nomad job run ~/nomad/traefik.nomad
+
+echo ""
+printf "${GREEN}Congratulations, Nomad is installed!${NC}\n"
+printf "${YELLOW}Nomad UI is available at http://${formatted_addr}:4646${NC}\n"
+printf "${YELLOW}Traefik UI is available at http://${formatted_addr}:8080${NC}\n\n"
+echo ""
