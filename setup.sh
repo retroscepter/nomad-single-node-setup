@@ -190,8 +190,6 @@ job "traefik" {
     count = 1
 
     network {
-      mode = "bridge"
-
       port "http" {
         static = 80
       }
@@ -213,6 +211,20 @@ job "traefik" {
       name = "traefik-https"
       provider = "nomad"
       port = "https"
+    }
+
+    service {
+      name = "traefik-admin"
+      provider = "nomad"
+      port = "admin"
+
+      # tags = [
+      #   "traefik.enable=true",
+      #   "traefik.http.routers.traefik-ui.rule=Host($(traefik.yourdomain.com))",
+      #   "traefik.http.routers.traefik-ui.entrypoints=websecure",
+      #   "traefik.http.routers.traefik-ui.tls=true",
+      #   "traefik.http.routers.traefik-ui.tls.certresolver=letsencrypt",
+      # ]
     }
 
     volume "traefik" {
